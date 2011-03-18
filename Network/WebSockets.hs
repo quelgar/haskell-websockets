@@ -74,6 +74,8 @@ import Data.Char (isDigit, chr, ord)
 import Data.List (isPrefixOf, isSuffixOf)
 import qualified Control.Exception as E
 import qualified Data.Map as M
+import Control.Applicative
+import Network.HTTP.Headers (Header, mkHeader, headerMap)
 
 
 -- | Contains the request details.
@@ -127,7 +129,35 @@ shakeHands h = do
     Right r -> putResponse h r >> return request
     Left  _ -> return request -- Returns the error.
 
+exists :: (a -> Boolean) -> Maybe a -> Boolean
+exists = maybe False
 
+data HandshakeResult = PlainHTTP { 
+    reqPath :: String,
+    reqHeaders :: [Header]
+    } |
+  BadHandshake HandshakeError |
+  GoodHandshake Request
+
+getRequestOrHTTP :: Handle -> IO HandshakeResult
+getRequestOrHTTP h = toString <$> B.hGetLine h >>= firstLine where
+  firstLine first
+    | "GET " `isPrefixOf` first && " HTTP/1.1\r" `isSuffixOf` first = headers (words first !! 1) M.empty
+    | otherwise = return.BadHandshake $ HsInvalidGETRequest first
+  headers path req = toString <$> B.hGetLine h >>= aLine path req
+  aLine _    _   []   = return . BadHandshake $ HsInvalidHeaderLine []
+  aLine path req line = aHeader path req $ break (==':') (init line)
+  aHeader path req ("", "")
+    | isWebSocket req = validate path req . B.unpack <$> B.hGet h 8
+    | otherwise = return $ PlainHTTP path (toHeader <$> M.toList req)
+  aHeader path req (k, v) = headers path $ M.insert k (fixValue v) req
+  fixValue (':':' ':xs) = xs
+  fixValue = tail
+  validate path req token = either BadHandshake GoodHandshake $ validateRequest $ M.union req (M.fromList
+    [("Path", path), ("Token", token)])
+  isWebSocket req = exists (=="WebSocket") (M.lookup "Upgrade" req) &&
+    exists (=="Upgrade") (M.lookup "Connection" req)
+  toHeader (k, v) = mkHeader (fromMaybe $ HdrCustom k $ lookup k headerMap) v
 
 -- | Reads the client's opening handshake and returns either a
 -- 'Request' based on its contents, or a 'HandshakeError' in case of
